@@ -4,6 +4,7 @@ import json
 import subprocess
 import tarfile
 import zipfile
+from email.parser import BytesParser
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -43,6 +44,8 @@ def test_candidate_manifest_binds_artifacts_to_source_identity(candidate_dir: Pa
 
     assert manifest["name"] == "ml4t-models"
     assert manifest["version"] == __version__
+    assert manifest["metadata"]["description"]
+    assert manifest["metadata"]["project_urls"]
     assert {record["filename"] for record in manifest["artifacts"]} == {
         f"ml4t_models-{__version__}-py3-none-any.whl",
         f"ml4t_models-{__version__}.tar.gz",
@@ -101,6 +104,35 @@ def test_candidate_contains_typing_and_documentation_contracts(candidate_dir: Pa
     assert "SECURITY.md" in sdist_members
     assert "mkdocs.yml" in sdist_members
     assert "docs/getting-started/installation.md" in sdist_members
+
+
+def test_candidate_distributions_expose_canonical_project_metadata(candidate_dir: Path) -> None:
+    wheel, sdist = candidate._distribution_files(candidate_dir)
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_name = next(
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        )
+        wheel_metadata = BytesParser().parsebytes(archive.read(metadata_name))
+
+    with tarfile.open(sdist, "r:gz") as archive:
+        metadata_member = next(
+            member
+            for member in archive.getmembers()
+            if member.name.count("/") == 1 and member.name.endswith("/PKG-INFO")
+        )
+        stream = archive.extractfile(metadata_member)
+        assert stream is not None
+        sdist_metadata = BytesParser().parsebytes(stream.read())
+
+    for metadata in (wheel_metadata, sdist_metadata):
+        assert metadata["Author-email"] == "Stefan Jansen <stefan@applied-ai.com>"
+        assert metadata["Maintainer-email"] == "Stefan Jansen <pm@ml4trading.io>"
+        assert metadata["Summary"] == (
+            "Finance-specific models for asset pricing, prediction, and portfolio learning."
+        )
+        project_urls = metadata.get_all("Project-URL", [])
+        assert "Homepage, https://www.ml4trading.io/" in project_urls
+        assert "Documentation, https://www.ml4trading.io/docs/models/" in project_urls
 
 
 def _performance_inputs(tmp_path: Path) -> tuple[list[Path], list[Path]]:
@@ -222,6 +254,20 @@ def test_installed_typecheck_targets_candidate_environment(
         str(python),
         str(consumer),
     ]
+
+
+def test_installed_wheel_suite_excludes_repository_only_tests(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    package_test = tests / "test_types.py"
+    package_test.touch()
+    for name in test_wheel.REPOSITORY_ONLY_TESTS:
+        (tests / name).touch()
+
+    selected = test_wheel._installed_test_paths(tmp_path, "full")
+
+    assert selected == [str(package_test)]
+    assert "test_release_workflow.py" in test_wheel.REPOSITORY_ONLY_TESTS
 
 
 def test_hardware_qualification_separates_replay_and_cpu_recovery_tolerances() -> None:
